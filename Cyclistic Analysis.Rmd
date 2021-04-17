@@ -1,0 +1,606 @@
+---
+title: "Divvy Ride-Share Analysis"
+author: "David"
+date: "4/16/2021"
+output:
+  prettydoc::html_pretty:
+    theme: leonids
+
+
+---
+<style>
+body{
+  font-family: Calibri;
+  font-size: 13pt;
+</style>
+---
+
+# Purpose
+The purpose for this analysis is to understand the difference between annual members to divvy ride-share and casual riders. We will accomplish this by looking at ride-share use for the past 12 months. For this analysis, we looked at Jan-2020 through Dec-2020
+
+
+## Prepare and Process the Data
+```{r setup,  message = FALSE, warning=FALSE}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(readxl)
+library(ggthemes)
+library(hms)
+library(leaflet)
+
+theme_set(theme_few())
+options(scipen = 999)
+```
+
+```{r message=FALSE, warning=FALSE}
+# get a list of files in the working directory all of the files were downloaded as zip files. These files were .csv files. I converted them to .xlsx files because the .csv files were not keeping the cell formulas for trip_length and weekday. In the end I didn't need them, and performed the calculations in R.
+trip_files <- list.files(pattern = ".xlsx", full.names = TRUE)
+
+# use the list and the map_df function from purrr to import all files at the
+# same time and combine them into a data frame. I am passing the ride_length 
+# into R as numeric to see how it will read it in. Previously I told it to
+# guess the data type. The conversion makes the value too small to make sense.
+trips_combined <- trip_files %>% 
+  map_df(read_xlsx,
+         col_types = c("text", "text", "guess", "guess", 
+                       "text", "text", "text", "text",
+                       "numeric", "numeric", "numeric", "numeric",
+                       "text", "guess", "numeric")) %>% 
+  clean_names()
+
+glimpse(trips_combined)
+# Rows: 3,489,748
+# Columns: 15
+# $ ride_id            <chr> "A847FADBBC638E45", "5405B80E996FF60D", "5DD24A79A4E~
+# $ rideable_type      <chr> "docked_bike", "docked_bike", "docked_bike", "docked~
+# $ started_at         <dttm> 2020-04-26 17:45:00, 2020-04-17 17:08:00, 2020-04-0~
+# $ ended_at           <dttm> 2020-04-26 18:12:00, 2020-04-17 17:17:00, 2020-04-0~
+# $ start_station_name <chr> "Eckhart Park", "Drake Ave & Fullerton Ave", "McClur~
+# $ start_station_id   <chr> "86", "503", "142", "216", "125", "173", "35", "434"~
+# $ end_station_name   <chr> "Lincoln Ave & Diversey Pkwy", "Kosciuszko Park", "I~
+# $ end_station_id     <chr> "152", "499", "255", "657", "323", "35", "635", "382~
+# $ start_lat          <dbl> 41.8964, 41.9244, 41.8945, 41.9030, 41.8902, 41.8969~
+# $ start_lng          <dbl> -87.6610, -87.7154, -87.6179, -87.6975, -87.6262, -8~
+# $ end_lat            <dbl> 41.9322, 41.9306, 41.8679, 41.8992, 41.9695, 41.8923~
+# $ end_lng            <dbl> -87.6586, -87.7238, -87.6230, -87.6722, -87.6547, -8~
+# $ member_casual      <chr> "member", "member", "member", "member", "casual", "m~
+# $ ride_length        <dttm> 1899-12-31 00:27:00, 1899-12-31 00:09:00, 1899-12-3~
+# $ weekday            <dbl> 1, 6, 4, 3, 7, 5, 5, 3, 4, 7, 7, 7, 6, 7, 2, 7, 1, 7~
+
+# I originally performed the calculation for ride_length in Excel, however it 
+# imports the values differently into R. Subtracting the difference between 
+# the columns of interest in R gives us the difference in seconds, so I convert the
+# value to numeric and then divide by 60 to get the number of minutes 
+trips_combined <- trips_combined %>% 
+  mutate(ride_length = as.numeric(ended_at - started_at),
+         ride_length_min = ride_length / 60,
+         ride_length_hrs = ride_length_min / 60,
+         weekday = wday(started_at, label = TRUE))
+
+# I checked the values in files and the issue is in the file before pulling 
+# data into R. We could change it in the files or we could recode the values
+# in R. I would let whoever created the files the issue and verify that this
+# is the correct course of action.
+
+trips_combined <- trips_combined %>% 
+  mutate(
+    started_at = case_when(
+      started_at > ended_at ~ ended_at,
+      TRUE ~ started_at
+    ),
+  ended_at = case_when(
+    ended_at < started_at ~ started_at,
+    TRUE ~ ended_at
+  ),
+  ride_length = as.numeric(ended_at - started_at),
+  ride_length_min = ride_length / 60,
+  ride_length_hrs = ride_length_min / 60
+  ) 
+```
+
+
+```{r message=FALSE, warning=FALSE}
+
+# check to see if the values make sense
+trips_combined %>% 
+  summarise(min_ride_length_min = min(ride_length_min),
+            max_ride_length_min = max(ride_length_min),
+            min_ride_length_hr = min(ride_length_hrs),
+            max_ride_length_hr = max(ride_length_hrs)) %>% 
+  pivot_longer(cols = everything(),
+               names_to = "ride(min v hr)",
+               values_to = "value")
+
+# `ride(min v hr)`      value
+# 1 min_ride_length_min -29050.
+# 2 max_ride_length_min  58720 
+# 3 min_ride_length_hr    -484.
+# 4 max_ride_length_hr     979.
+
+# What's the average ride time?
+trips_combined %>% 
+  summarise(avg_ride_length_min = mean(ride_length_min),
+            sd_ride_length_min = sd(ride_length_min),
+            lower = avg_ride_length_min - sd_ride_length_min,
+            upper = avg_ride_length_min + sd_ride_length_min) %>% 
+  pivot_longer(cols = everything(),
+               names_to = "value_type", 
+               values_to = "value")
+# value_type          value
+# avg_ride_length_min  24.8
+# sd_ride_length_min  390. 
+# lower               -366. 
+# upper                415. 
+# 1 Standard Deviation below the average ride length is negative
+
+# How many ride_length values are greater than 1 standard deviation above?
+# Are the ride_ids distinct? Yes
+trips_combined %>% 
+  filter(ride_length_min > 390) %>% 
+  summarise(row_count = n(),
+            distinct_rides = n_distinct(ride_id))
+#  row_count distinct_rides
+#   9079           9079
+   
+
+# How many ride_length values are negative values?
+trips_combined %>% 
+  filter(ride_length_min < 0) %>% 
+  summarise(row_count = n())
+# row_count
+# 6408
+```
+
+```{r message=FALSE, warning=FALSE}
+trips_combined %>% 
+  filter(ride_length_min < 0) %>% 
+  head(20) 
+
+# Looking at the start and end times for the rides, it looks like the values should be flipped. Does this affect certain months? If it's only certain months, was it a data import error or is it recorded that way?
+# trips_combined %>% 
+#   filter(ride_length_min < 0) %>% 
+#   mutate(ride_month = month(started_at, label = TRUE)) %>% 
+#   group_by(ride_month) %>% 
+#   summarise(ride_count = n()) %>% 
+#   ggplot(aes(x = ride_month, y = ride_count)) +
+#   geom_col()
+
+# The issue happens across every month, but is most impactful in Sept and Oct
+# trips_combined %>% 
+#   filter(ride_length_min < 0, 
+#          month(started_at) == 9) 
+
+```
+
+```{r message=FALSE, warning=FALSE}
+# Export data to a .csv file to prep data in Tableau Prep, calculate distance
+# and export to a .csv and as a .hyper file to create visuals in Tableau
+write_csv(trips_combined, "trips_combined.csv")
+```
+
+```{r message=FALSE, warning=FALSE}
+trips_distance <- read_csv("Trip Data Analysis.csv") %>% 
+  clean_names() %>% 
+  select(ride_id, trip_distance)
+
+trips_combined <- trips_combined %>% 
+  inner_join(trips_distance, by = "ride_id") %>% 
+  mutate(trip_distance = round(trip_distance, 2))
+
+rm(trips_distance)
+```
+
+```{r message=FALSE, warning=FALSE}
+# there are 372,815 records where the bike didn't move from the same lat/lng
+trips_combined %>% 
+  filter(is.na(trip_distance) | trip_distance == 0.00) %>% 
+  count()
+
+trips_combined <- trips_combined %>% 
+  mutate(trip_distance = ifelse(
+    is.na(trip_distance), 0.00,
+    trip_distance
+  ))
+
+trips_combined <- trips_combined %>% 
+  mutate(weekday = factor(weekday, 
+        levels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")))
+
+# I want to look at average time by month and also by the time of the day to see
+# if there is a certain time that is more likely 
+trips_combined <- trips_combined %>% 
+  mutate(ride_month = month(started_at, label = TRUE),
+         ride_time = as_hms(started_at),
+         time_of_day = case_when(
+           between(hour(ride_time), 00, 12) ~ "Morning",
+           between(hour(ride_time), 12, 17) ~ "Afternoon",
+           between(hour(ride_time), 17, 21) ~ "Evening",
+           between(hour(ride_time), 21, 24) ~ "Night"
+         ))
+
+# There are a lot of rows that don't have the station information
+# This is the case for both members and casual, looking at the map of location
+# in Tableau, they are concentrated in 2 locations. If I knew the name of the station we could fix this
+# however, since I don't know the name, I have decided to remove them from the analysis
+trips_combined <- trips_combined %>% 
+  filter(!is.na(start_station_name), !is.na(end_station_name), trip_distance > 0.00)
+```
+
+```{r message=FALSE, warning=FALSE}
+trips_combined %>% 
+  filter(trip_distance == 0.00) %>% 
+  group_by(member_casual) %>% 
+  summarise(row_count = n()) %>% 
+  adorn_totals()
+
+# What percent of trips did the bike not get used?
+trips_combined %>% 
+  summarise(pct_unused = mean(trip_distance == 0.00))
+# 10.7% of rides never left the station
+trips_combined %>% 
+  summarise(pct_unused = mean(trip_distance == 0.00 
+                              & member_casual == "casual") * 100)
+# 7.14% of all rides had no distance and were casual members
+trips_combined %>% 
+  summarise(pct_unused = mean(trip_distance == 0.00 
+                              & member_casual == "member") * 100)
+# 3.54% of all rides had no distance and were members
+
+trips_combined %>% 
+  group_by(member_casual) %>% 
+  summarise(pct_unused = mean(trip_distance == 0.00) * 100)
+# member_casual pct_unused
+# casual             17.4 
+# member             5.99
+```
+
+```{r message=FALSE, warning=FALSE}
+trips_combined %>% 
+  group_by(weekday) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = fct_rev(weekday), y = ride_count)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = NULL, 
+       y = " Ride Count")
+
+trips_combined %>% 
+  group_by(member_casual, weekday) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = fct_rev(weekday), y = ride_count)) +
+  geom_col() +
+  facet_wrap(~ member_casual, scales = "free_x", ncol = 1) +
+  coord_flip() +
+  labs(x = NULL, 
+       y = "Ride Count",
+       title = "Ride Count by Membership Type")
+
+trips_combined %>% 
+  group_by(member_casual, weekday) %>% 
+  summarise(avg_ride_length = mean(ride_length_min, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = fct_rev(weekday), y = avg_ride_length)) +
+  geom_col() +
+  facet_wrap(~ member_casual, scales = "free_x", ncol = 1) +
+  coord_flip() +
+  labs(x = NULL, 
+       y = "Average Ride Length",
+       title = "Average Ride Length by Membership Type")
+
+# trips_combined %>% 
+#   group_by(member_casual, weekday) %>% 
+#   summarise(avg_ride_length = mean(ride_length_min, na.rm = TRUE)) %>% 
+#   ungroup() %>% 
+#   ggplot(aes(x = fct_rev(weekday), 
+#              y = avg_ride_length, 
+#              fill = member_casual)) +
+#   geom_col(position = position_dodge()) +
+#   coord_flip() +
+#   labs(x = NULL, 
+#        y = "Average Ride Length",
+#        title = "Average Ride Length by Membership Type",
+#        subtitle = "Ride Length (minutes)",
+#        fill = "Member Status") +
+#   theme(legend.position = "top")
+```
+
+```{r message=FALSE, warning=FALSE}
+# trips_combined %>% 
+#   group_by(ride_month, member_casual) %>% 
+#   summarise(avg_ride_length = mean(ride_length_min)) %>% 
+#   ungroup() %>% 
+#   ggplot(aes(x = fct_rev(ride_month), y = avg_ride_length, fill = member_casual)) +
+#   geom_col(position = position_dodge()) +
+#   coord_flip()
+
+# casual riders are going to take longer trips on average
+trips_combined %>% 
+  group_by(ride_month, member_casual) %>% 
+  summarise(avg_ride_length = mean(ride_length_min)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = fct_rev(ride_month), y = avg_ride_length, 
+             color = member_casual, group = member_casual)) +
+  geom_line(size = 1.05) +
+  geom_point(size = 3) +
+  labs(x = NULL,
+       y = "Average Ride Length",
+       title = "Average Ride Length per Month by Membership",
+       color = "Membership") +
+  theme(legend.position = "bottom")
+  
+# casual riders are traveling longer distances on average
+trips_combined %>% 
+  group_by(ride_month, member_casual) %>% 
+  summarise(avg_ride_dist = mean(trip_distance)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = ride_month, y = avg_ride_dist, 
+             color = member_casual, group = member_casual)) +
+  geom_line(size = 1.05) +
+  geom_point(size = 3) +
+  labs(x = NULL,
+       y = "Average Ride Distance",
+       title = "Average Ride Distance per Month by Membership",
+       color = "Membership") +
+  theme(legend.position = "bottom")
+
+trips_combined %>% 
+  filter(member_casual == "casual") %>% 
+  group_by(ride_month, start_station_name) %>% 
+  summarise(avg_ride_dist = mean(trip_distance, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = ride_month, y = avg_ride_dist, group = start_station_name, color = start_station_name)) +
+  geom_point(size = 3) +
+  labs(x = NULL,
+       y = "Average Ride Distance",
+       title = "Average Ride Distance per Month by Membership",
+       color = "Membership") +
+  theme(legend.position = "none")
+
+
+
+trips_combined %>% 
+  filter(member_casual == "member") %>% 
+  group_by(ride_month, start_station_name) %>% 
+  summarise(avg_ride_dist = mean(trip_distance, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = ride_month, y = avg_ride_dist, group = start_station_name, color = start_station_name)) +
+  geom_point(size = 3) +
+  labs(x = NULL,
+       y = "Average Ride Distance",
+       title = "Average Ride Distance per Month by Membership",
+       color = "Membership") +
+  theme(legend.position = "none")
+
+
+trips_combined %>% 
+  group_by(member_casual, time_of_day) %>% 
+  summarise(avg_ride_length = mean(ride_length_min)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = time_of_day, y = avg_ride_length)) +
+  geom_col() +
+  facet_wrap(~ member_casual) +
+  labs(x = NULL,
+       y = "Average Ride Length",
+       title = "Average Ride Length by Time of Day and Membership")
+
+trips_combined %>% 
+  group_by(member_casual, time_of_day) %>% 
+  summarise(avg_ride_dist = mean(trip_distance)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = time_of_day, y = avg_ride_dist)) +
+  geom_col() +
+  facet_wrap(~ member_casual) +
+  labs(x = NULL,
+       y = "Average Ride Distance",
+       title = "When are riders using the bikes and how far are they going?")
+
+# Is the mean the appropriate measure for this data? Should we look at the mean? 
+# We know there are a lot of trips that don't have a distance/time associated
+# Should those be filtered out of the analysis?
+trips_combined %>% 
+  group_by(member_casual, time_of_day) %>% 
+  summarise(median_ride_dist = median(trip_distance)) %>% 
+  pivot_wider(id_cols = member_casual, names_from = time_of_day, values_from = median_ride_dist)
+
+trips_combined %>% 
+  group_by(member_casual, time_of_day) %>% 
+  summarise(median_ride_length = median(ride_length_min)) %>% 
+  pivot_wider(id_cols = member_casual, names_from = time_of_day, values_from = median_ride_length)
+
+
+
+trips_combined %>% 
+  filter(member_casual == "casual") %>% 
+  group_by(start_station_name) %>% 
+  summarise(ride_count = n()) %>% 
+  top_n(n = 15) %>% 
+  ggplot(aes(x = fct_reorder(start_station_name, ride_count), y = ride_count)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = NULL, 
+       y = "Starting Station",
+       title = "Top 15 Starting Stations for Casual Riders")
+
+
+trips_combined %>% 
+  filter(member_casual == "member") %>% 
+  group_by(start_station_name) %>% 
+  summarise(ride_count = n()) %>% 
+  top_n(n = 15) %>% 
+  ggplot(aes(x = fct_reorder(start_station_name, ride_count), y = ride_count)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = NULL, 
+       y = "Starting Station",
+       title = "Top 15 Starting Stations for Annual Members")
+
+```
+
+```{r message=FALSE, warning=FALSE}
+trips_combined %>% 
+  count(rideable_type)
+
+trips_combined %>% 
+  count(member_casual, rideable_type) %>% 
+  pivot_wider(id_cols = member_casual,
+              names_from = rideable_type,
+              values_from = n)
+
+# What rideable type is most popular for each group?
+trips_combined %>% 
+  filter(member_casual == "casual") %>% 
+  group_by(rideable_type) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  mutate(pct_of_ride_type = ride_count / sum(ride_count)) %>% 
+  arrange(rideable_type)
+# rideable_type ride_count pct_of_ride_type
+# classic_bike       61120           0.0550
+# docked_bike       895274           0.805 
+# electric_bike     155726           0.140  
+
+
+trips_combined %>% 
+  filter(member_casual == "member") %>% 
+  group_by(rideable_type) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  mutate(pct_of_ride_type = ride_count / sum(ride_count)) %>% 
+  arrange(rideable_type)
+# rideable_type ride_count pct_of_ride_type
+# classic_bike      235943            0.129
+# docked_bike      1349207            0.735
+# electric_bike     249697            0.136
+
+# Within each rideable type, which groups makes up the largest proportion?
+trips_combined %>% 
+  group_by(member_casual, rideable_type) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  group_by(rideable_type) %>% 
+  mutate(pct_of_ride_type = ride_count / sum(ride_count)) %>% 
+  arrange(rideable_type) 
+#  member_casual rideable_type ride_count pct_of_ride_type
+# casual        classic_bike       61120            0.206
+# member        classic_bike      235943            0.794
+# casual        docked_bike       895274            0.399
+# member        docked_bike      1349207            0.601
+# casual        electric_bike     155726            0.384
+# member        electric_bike     249697            0.616
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+trips_combined %>% 
+  group_by(member_casual, rideable_type, ride_month) %>%
+  summarise(avg_ride_length = mean(ride_length_min)) %>% 
+  ggplot(aes(x = ride_month, y = avg_ride_length, color = rideable_type, group = rideable_type)) +
+  geom_line() +
+  facet_grid(cols = vars(member_casual)) +
+  theme(legend.position = "bottom") +
+  labs(x = NULL, 
+       y = "Average Ride Length",
+       title = "What bikes are used the most?",
+       subtitle = "Average Ride Length")
+
+trips_combined %>% 
+  group_by(member_casual, rideable_type, ride_month) %>%
+  summarise(avg_ride_dist = mean(trip_distance)) %>% 
+  ggplot(aes(x = ride_month, y = avg_ride_dist, color = rideable_type, group = rideable_type)) +
+  geom_line() +
+  facet_grid(cols = vars(member_casual)) +
+  theme(legend.position = "bottom") +
+  labs(x = NULL, 
+       y = "Average Ride Length",
+       title = "What bikes are used the most?",
+       subtitle = "Average Ride Distance")
+
+
+# trips_combined %>% 
+#   filter(ride_month == "Jan", member_casual == "member") %>% 
+#   View()
+
+```
+
+```{r message=FALSE, warning=FALSE}
+# The top 3 locations where casual riders start their rides
+# aren't started by members. They all are in the same area of chicago.
+# Looking at google maps we find that they are near the lake and close to each other. 
+# The attractions around these areas look to be tourist attractions, such as Adler Planetarium, 
+# and the Aquarium. They tend to go to each of the same stations.
+trips_combined %>% 
+  filter(member_casual == "casual") %>% 
+  group_by(start_station_name) %>% 
+  summarise(ride_count = n()) %>% 
+  top_n(n = 15) %>% 
+  full_join(trips_combined %>% 
+  filter(member_casual == "member") %>% 
+  group_by(start_station_name) %>% 
+  summarise(ride_count = n()) %>% 
+  top_n(n = 15), 
+  by = "start_station_name",
+  suffix = c("_casual", "_member")) %>% 
+  arrange(desc(ride_count_casual)) %>% 
+  head(5)
+# start_station_name         ride_count_casual ride_count_member
+# 1 Streeter Dr & Grand Ave                20119                NA
+# 2 Lake Shore Dr & Monroe St              14692                NA
+# 3 Millennium Park                        14393                NA
+# 4 Theater on the Lake                    12096             13720
+# 5 Lake Shore Dr & North Blvd             10711             12675
+
+trips_combined %>% 
+  filter(member_casual == "casual") %>% 
+  group_by(start_station_name) %>% 
+  summarise(ride_count = n()) %>% 
+  top_n(n = 15) %>% 
+  full_join(trips_combined %>% 
+  filter(member_casual == "member") %>% 
+  group_by(start_station_name) %>% 
+  summarise(ride_count = n()) %>% 
+  top_n(n = 15), 
+  by = "start_station_name",
+  suffix = c("_casual", "_member")) %>% 
+  arrange(desc(ride_count_member)) 
+
+trips_combined %>% 
+  filter(start_station_name %in% c("Streeter Dr & Grand Ave",
+                                   "Lake Shore Dr & Monroe St",
+                                   "Millennium Park")) %>% 
+  group_by(start_station_name, end_station_name) %>% 
+  summarise(ride_count = n(),
+            avg_dist = mean(trip_distance),
+            avg_trip_length = mean(ride_length_min)) %>% 
+  filter(ride_count >= 700) %>% 
+  arrange(start_station_name, desc(ride_count)) 
+```
+
+## Summary of Analysis
+ * I looked at ride length in minutes and ride distance. 
+ * I broke it down by whether the rider was an annual member or a casual rider. 
+ * I looked at multiple if there was a difference in time of day, week day, month. 
+ * In both ride length and ride distance casual riders on average had longer bike rides. 
+ * The top starting stations for casual riders had no annual members that started from these stations.
+ * These stations were all located within the same area of Chicago. 
+ 
+```{r message=FALSE, warning=FALSE}
+top_stations <- trips_combined %>% 
+  filter(start_station_name %in% c("Streeter Dr & Grand Ave",
+                                   "Lake Shore Dr & Monroe St",
+                                   "Millennium Park")) %>% 
+  select(start_station_name, start_lat, start_lng) %>% 
+  distinct(start_station_name, .keep_all = TRUE)
+
+top_stations %>%   
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(lng = ~start_lng, lat = ~start_lat, label = ~start_station_name)
+```
+
+## Recommendations
+  * Survey a sample of casual riders to understand who they are.
+  * Add more docked-bikes in areas where casual riders are most likely to use them.
